@@ -1,0 +1,9 @@
+{
+  "name": "prototype-stack",
+  "private": true,
+  "scripts": {
+    "dev:web": "pnpm --filter web dev",
+    "dev:api": "cd apps/api && uv run fastapi dev"
+  },
+  "packageManager": "pnpm@10.32.1"
+}
