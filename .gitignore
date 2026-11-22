@@ -14,3 +14,6 @@ __pycache__/
 
 # misc
 .DS_Store
+
+# RDS CA bundle, downloaded by `pnpm db:cert`
+apps/api/certs/

@@ -8,7 +8,7 @@ A lean, general-purpose stack for prototyping web apps and startup ideas (agent 
 - **Postgres on AWS RDS** is the only datastore. It also holds vectors (pgvector).
 - **Alembic is the only migration tool.** Python owns the schema.
 - **Next.js is UI only.** It renders pages and calls FastAPI. It does no database access and holds no business logic.
-- **Clerk** for auth, **Vercel** for Next.js hosting. Nothing outside the VPC needs database access, so RDS stays private.
+- **Clerk** for auth (deferred: the prototype runs without login for now), **Vercel** for Next.js hosting. Nothing outside the VPC needs database access, so RDS stays private.
 
 ## Guiding principle
 
@@ -21,13 +21,13 @@ A lean, general-purpose stack for prototyping web apps and startup ideas (agent 
                ▲                      ▲ JWKS (cached)
 Browser ──► Next.js on Vercel ──server-side fetch + JWT──► FastAPI on ECS ──► RDS Postgres
    │        (UI only)                                      ▲   (private VPC)
-   └──── TanStack Query / useChat (SSE) + JWT ─────────────┘
+   └──── TanStack Query + Socket.IO chat (WebSocket) ──────┘
 ```
 
 Data-flow rules:
 - **Server components and server actions** call FastAPI server-side and forward the user's JWT.
 - **Client components** call FastAPI directly through the generated client and TanStack Query.
-- **Chat** (`useChat`) streams directly from FastAPI. Next.js never proxies long-lived streams.
+- **Chat** runs over Socket.IO directly between the browser and FastAPI (see [SYSTEM_DESIGN.md](SYSTEM_DESIGN.md#chat-streaming-socketio)). Next.js never proxies long-lived connections.
 - **FastAPI** verifies Clerk JWTs statelessly against Clerk's JWKS and has no session logic of its own.
 - Tokens travel as `Authorization: Bearer`, never in cookies, because Vercel and the API are on different origins.
 
@@ -43,7 +43,7 @@ Data-flow rules:
 ### Frontend
 - **Next.js 16** (App Router), **Tailwind v4**, **shadcn/ui**
 - **TanStack Query** with the generated API client (hey-api's TanStack Query plugin)
-- **Vercel AI SDK UI** (`useChat`) for chat. FastAPI emits the AI SDK UI message stream protocol via Pydantic AI's Vercel AI adapter. Pin the AI SDK major version because the protocol changes between majors.
+- **socket.io-client** for chat, talking to python-socketio on FastAPI. No Vercel AI SDK: the chat protocol (`chat:message` / `chat:delta`) is ours, so it doesn't break when a third-party SDK changes major versions.
 - **@clerk/nextjs**: `clerkMiddleware()` in `proxy.ts` (Next 16's renamed middleware) and prebuilt sign-in/user components
 - **@t3-oss/env-nextjs** for typed env
 
@@ -57,12 +57,12 @@ Data-flow rules:
 - **AWS RDS Postgres** (16+) with **pgvector**, in private subnets
 - Local: docker-compose `pgvector/pgvector` image pinned to the same Postgres major version as RDS
 - One database role per service with least privilege. Migrations run under a separate owner role.
-- **ElastiCache (Valkey)** only when needed (resumable streams, rate limits, pub/sub)
+- **ElastiCache (Valkey)** only when needed (Socket.IO Redis manager for more than one API instance, rate limits, pub/sub)
 
 ### Auth (Clerk)
 - **Getting a token:** server side, `await (await auth()).getToken()`; client side, `useAuth().getToken()`. Attach it to every API call through the generated client's request interceptor.
 - **Verifying in FastAPI:** a single `current_user` dependency uses **PyJWT** + `PyJWKClient` with cached keys. It checks the signature, `exp`/`nbf`, `iss` (your Clerk Frontend API URL), and `azp` (an allowlist of your web origins).
-- **Short-lived tokens:** Clerk session tokens last about 60s. The client SDK refreshes them automatically. SSE streams verify once at connection start, so long streams aren't affected.
+- **Short-lived tokens:** Clerk session tokens last about 60s. The client SDK refreshes them automatically. Socket.IO verifies once at the handshake (token in the `auth` payload), so long streams aren't affected.
 - **User records:** `app.users` keyed by Clerk user ID (`sub`), upserted lazily on the first authenticated request. Clerk webhooks (`user.updated`, `user.deleted`) go to `POST /webhooks/clerk` on FastAPI and are verified with the **svix** library.
 - **Multi-tenant (B2B):** use **Clerk Organizations**. The active org ID is in the session token; FastAPI scopes queries by it.
 - **Extra claims** (e.g. email) go in Clerk's session-token customization, not JWT templates. Keep the token small.
@@ -78,13 +78,13 @@ Data-flow rules:
 - Graduate to **Temporal / Inngest** only when durable multi-step workflows are needed
 
 ### AI-specific
-- **Pydantic AI** or the provider SDK directly
+- **Provider SDKs directly** (`anthropic`; `openai` for OpenAI's Responses API and for open-weight servers over Chat Completions) behind a small in-house gateway in `apps/api/src/api/llm/`. No agent framework.
 - Persist messages and tool calls in Postgres
 - **Langfuse Cloud** or **Pydantic Logfire** for LLM traces. Self-hosted Langfuse needs ClickHouse, Redis, and S3, which is not lean.
 - **Pydantic Evals** (or Langfuse datasets) for evals
 
 ### Ops & hosting
-- **FastAPI on ECS Fargate** in the same VPC as RDS, behind an ALB. Raise the ALB idle timeout (e.g. 300s+) and send SSE heartbeats so streams aren't cut.
+- **FastAPI on ECS Fargate** in the same VPC as RDS, behind an ALB. Socket.IO's ping (every 25s) keeps WebSockets under the ALB idle timeout. The client is WebSocket-only, so no sticky sessions are needed.
 - **Next.js on Vercel.** `app.example.com` → Vercel, `api.example.com` → ALB. Preview deploys use the staging API + Clerk dev instance.
 - **CORS on FastAPI:** the production origin plus a regex for your Vercel preview URLs; allow the `Authorization` header
 - Secrets in **AWS Secrets Manager / SSM**; infra as code (**SST v3** or **Terraform**)
@@ -110,7 +110,7 @@ mise.toml              tool versions + tasks (dev, codegen, migrate)
 
 ## Deliberately skipped
 
-A second backend (Fastify/Hono), a TS ORM or any TS database access, business logic in Next.js route handlers, self-hosted auth, GraphQL, Kafka, Kubernetes, Turborepo, a shared `ui` package (until a second frontend exists), and heavy abstraction frameworks (LangChain-style).
+A second backend (Fastify/Hono), a TS ORM or any TS database access, business logic in Next.js route handlers, self-hosted auth, GraphQL, Kafka, Kubernetes, Turborepo, a shared `ui` package (until a second frontend exists), and heavy abstraction frameworks (LangChain-style, Vercel AI SDK).
 
 ## Accepted trade-offs
 

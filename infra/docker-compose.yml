@@ -1,0 +1,13 @@
+# Throwaway Postgres for tests (`pnpm test:api:db`), matching the dev RDS instance:
+# Postgres 18 with pgvector 0.8.1. Never point tests at RDS.
+services:
+  postgres:
+    image: pgvector/pgvector:0.8.1-pg18
+    environment:
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 1s
+      retries: 30
